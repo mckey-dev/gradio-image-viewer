@@ -1,6 +1,7 @@
 /**
  * ================================================================================
- * Gradio プレビュー用全画面ライトボックス（img クリック → モーダルに同じ src）。
+ * Gradio プレビュー用全画面ライトボックス。
+ * サムネイル src に #orig=<encoded_url> が付与されている場合は元画像 URL を優先表示する。
  * Python は lightbox.py が __grLightboxRootIds をセットしてから注入。CSS は LIGHTBOX_CSS と id を合わせる。
  * ================================================================================
  */
@@ -28,6 +29,7 @@
             options = options || {};
             this.ids = Object.assign({}, DEFAULT_ELEMENT_IDS, options.ids || {});
             this.fallbackRootIds = options.fallbackRootIds || ["gradio_image_viewer"];
+            this.currentIndex = -1;
 
             this.lightboxZoom = 1;
             this.panX = 0;
@@ -38,6 +40,76 @@
             this.dragStartY = 0;
             this.dragStartPanX = 0;
             this.dragStartPanY = 0;
+        }
+
+        /**
+         * ================================================================================
+         * 関数の概要: プレビュー画像URLからライトボックスで開く元画像URLを抽出する。
+         * 引数: @param {HTMLImageElement} img
+         * 戻り値: @returns {string}
+         * ================================================================================
+         */
+        getFullImageSrc(img) {
+            if (!img || !img.src) return "";
+            var previews = this.getOrderedPreviewImages();
+            var idx = previews.indexOf(img);
+            if (idx < 0) return img.src;
+            var originals = this.getCurrentPageOriginals();
+            if (idx >= originals.length) return img.src;
+            return this.toFileUrl(originals[idx], img.src);
+        }
+
+        /**
+         * ================================================================================
+         * 関数の概要: hidden テキストから現在ページの元画像パス配列を取得する。
+         * 引数: なし。
+         * 戻り値: @returns {string[]}
+         * ================================================================================
+         */
+        getCurrentPageOriginals() {
+            var holder = document.getElementById("gradio_image_viewer_originals");
+            if (!holder) return [];
+            var raw = "";
+            var input =
+                holder.matches("input,textarea")
+                    ? holder
+                    : holder.querySelector("input,textarea");
+            if (input && typeof input.value === "string" && input.value) {
+                raw = input.value;
+            } else if (typeof holder.textContent === "string" && holder.textContent) {
+                raw = holder.textContent;
+            }
+            if (!raw) return [];
+            try {
+                var parsed = JSON.parse(raw);
+                if (!Array.isArray(parsed)) return [];
+                return parsed.filter(function (x) {
+                    return typeof x === "string" && x.length > 0;
+                });
+            } catch (err) {
+                return [];
+            }
+        }
+
+        /**
+         * ================================================================================
+         * 関数の概要: ローカルパスを Gradio の /file= URL へ変換する。
+         * 引数: @param {string} source, @param {string} fallback
+         * 戻り値: @returns {string}
+         * ================================================================================
+         */
+        toFileUrl(source, fallback) {
+            if (!source) return fallback || "";
+            if (
+                source.startsWith("/file=") ||
+                source.startsWith("http://") ||
+                source.startsWith("https://") ||
+                source.startsWith("blob:") ||
+                source.startsWith("data:")
+            ) {
+                return source;
+            }
+            return "/file=" + encodeURIComponent(source);
         }
 
         /**
@@ -88,7 +160,9 @@
         getOrderedPreviewImages() {
             var list = [];
             this.forEachRoot(function (root) {
-                root.querySelectorAll("img").forEach(function (el) {
+                root
+                    .querySelectorAll("button.thumbnail-item.thumbnail-lg img")
+                    .forEach(function (el) {
                     if (el.src) list.push(el);
                 });
             });
@@ -110,15 +184,7 @@
             var next = this._byId("next");
             var counter = this._byId("counter");
             if (!big || !prev || !next) return;
-
-            var cur = big.src;
-            var idx = -1;
-            for (var i = 0; i < n; i++) {
-                if (imgs[i].src === cur) {
-                    idx = i;
-                    break;
-                }
-            }
+            if (this.currentIndex < 0 || this.currentIndex >= n) this.currentIndex = -1;
 
             var multi = n > 1;
             prev.style.display = multi ? "" : "none";
@@ -127,8 +193,8 @@
             next.disabled = !multi;
 
             if (counter) {
-                if (multi && idx >= 0) {
-                    counter.textContent = idx + 1 + " / " + n;
+                if (multi && this.currentIndex >= 0) {
+                    counter.textContent = this.currentIndex + 1 + " / " + n;
                     counter.style.display = "";
                 } else if (multi) {
                     counter.textContent = "— / " + n;
@@ -152,20 +218,14 @@
             if (imgs.length === 0) return;
             var big = this._byId("image");
             if (!big) return;
-
-            var cur = big.src;
-            var idx = -1;
-            for (var i = 0; i < imgs.length; i++) {
-                if (imgs[i].src === cur) {
-                    idx = i;
-                    break;
-                }
+            if (this.currentIndex < 0 || this.currentIndex >= imgs.length) {
+                this.currentIndex = 0;
+            } else {
+                this.currentIndex = (this.currentIndex + delta + imgs.length) % imgs.length;
             }
-            if (idx < 0) idx = 0;
-            idx = (idx + delta + imgs.length) % imgs.length;
 
             this.resetZoom();
-            big.src = imgs[idx].src;
+            big.src = this.getFullImageSrc(imgs[this.currentIndex]);
             this.refreshNavState();
         }
 
@@ -492,6 +552,7 @@
         closeModal() {
             var m = this._byId("modal");
             if (m) m.style.display = "none";
+            this.currentIndex = -1;
         }
 
         /**
@@ -507,7 +568,8 @@
             var modal = this.ensureModal();
             var big = this._byId("image");
             this.resetZoom();
-            big.src = idx < 0 ? clickedImg.src : imgs[idx].src;
+            this.currentIndex = idx;
+            big.src = idx < 0 ? this.getFullImageSrc(clickedImg) : this.getFullImageSrc(imgs[idx]);
             modal.style.display = "flex";
             modal.focus();
             this.refreshNavState();
@@ -542,9 +604,11 @@
         scan() {
             var self = this;
             this.forEachRoot(function (root) {
-                root.querySelectorAll("img").forEach(function (el) {
-                    self.bindPreview(el);
-                });
+                root
+                    .querySelectorAll("button.thumbnail-item.thumbnail-lg img")
+                    .forEach(function (el) {
+                        self.bindPreview(el);
+                    });
             });
         }
 
